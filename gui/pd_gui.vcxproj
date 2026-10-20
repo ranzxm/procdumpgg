@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32"><Configuration>Debug</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32"><Configuration>Release</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{E87EC578-B507-46B7-9B76-7C33E67B6012}</ProjectGuid>
+    <RootNamespace>pd_gui</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <PlatformToolset Condition="'$(VisualStudioVersion)' &gt;= '17.0'">v143</PlatformToolset>
+    <PlatformToolset Condition="'$(PlatformToolset)' == ''">v142</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <OutDir>$(MSBuildThisFileDirectory)..\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(MSBuildThisFileDirectory)obj\$(Platform)\$(Configuration)\</IntDir>
+    <TargetName>pd_gui</TargetName>
+    <ImGuiDir>$(MSBuildThisFileDirectory)..\third_party\imgui</ImGuiDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ImGuiDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;UNICODE;_UNICODE;NOMINMAX;WIN32_LEAN_AND_MEAN;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <WarningLevel>Level4</WarningLevel>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <RuntimeLibrary Condition="'$(Configuration)' == 'Debug'">MultiThreadedDebug</RuntimeLibrary>
+      <RuntimeLibrary Condition="'$(Configuration)' != 'Debug'">MultiThreaded</RuntimeLibrary>
+      <Optimization Condition="'$(Configuration)' == 'Debug'">Disabled</Optimization>
+      <Optimization Condition="'$(Configuration)' != 'Debug'">MaxSpeed</Optimization>
+      <BufferSecurityCheck>true</BufferSecurityCheck>
+      <ControlFlowGuard>Guard</ControlFlowGuard>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;dwmapi.lib;shell32.lib;shlwapi.lib;ole32.lib;uuid.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <RandomizedBaseAddress>true</RandomizedBaseAddress>
+      <DataExecutionPrevention>true</DataExecutionPrevention>
+      <ControlFlowGuard>Guard</ControlFlowGuard>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="main.cpp" />
+    <ClCompile Include="app.cpp" />
+    <ClCompile Include="dump_runner.cpp" />
+    <ClCompile Include="$(ImGuiDir)\imgui.cpp" />
+    <ClCompile Include="$(ImGuiDir)\imgui_draw.cpp" />
+    <ClCompile Include="$(ImGuiDir)\imgui_tables.cpp" />
+    <ClCompile Include="$(ImGuiDir)\imgui_widgets.cpp" />
+    <ClCompile Include="$(ImGuiDir)\backends\imgui_impl_win32.cpp" />
+    <ClCompile Include="$(ImGuiDir)\backends\imgui_impl_dx11.cpp" />
+    <ClInclude Include="app.h" />
+    <ClInclude Include="dump_runner.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\pd\pd.vcxproj">
+      <Project>{49B0E81A-D38E-426E-AB76-CC8463EC0003}</Project>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="CopyGuiLicenses" AfterTargets="Build">
+    <Copy SourceFiles="$(ImGuiDir)\LICENSE.txt" DestinationFiles="$(OutDir)ImGui-LICENSE.txt" />
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)..\LICENSE" DestinationFiles="$(OutDir)ProcessDump-LICENSE.txt" />
+  </Target>
+</Project>

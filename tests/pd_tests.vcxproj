@@ -39,7 +39,7 @@
       <ControlFlowGuard>Guard</ControlFlowGuard>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>Shlwapi.lib;Psapi.lib;Advapi32.lib;ntdll.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Shell32.lib;Shlwapi.lib;Psapi.lib;Advapi32.lib;ntdll.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <RandomizedBaseAddress>true</RandomizedBaseAddress>
@@ -48,7 +48,14 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="*.cpp" />
+    <ClCompile Include="*.cpp" Exclude="gui_runner_tests.cpp" />
+    <ClCompile Include="gui_runner_tests.cpp">
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <PreprocessorDefinitions>_HAS_TR1_NAMESPACE=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile Include="..\gui\dump_runner.cpp">
+      <LanguageStandard>stdcpp17</LanguageStandard>
+    </ClCompile>
     <ClCompile Include="..\pd\*.cpp" Exclude="..\pd\pd.cpp;..\pd\stdafx.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

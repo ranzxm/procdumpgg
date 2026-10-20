@@ -11,6 +11,43 @@ namespace
 		return size >= 0 && static_cast<unsigned __int64>(size) <= MAX_PE_IMAGE_SIZE &&
 			static_cast<unsigned __int64>(size) <= SIZE_MAX && size <= MAXDWORD;
 	}
+
+	const char* capture_area_name(image_capture_area area)
+	{
+		switch (area)
+		{
+		case image_capture_area::headers: return "PE-header";
+		case image_capture_area::executable_section: return "code/executable-section";
+		case image_capture_area::data_section: return "data-section";
+		case image_capture_area::directory_data: return "PE-directory-outside-sections";
+		case image_capture_area::outside_layout: return "outside-declared-layout (possible alignment gap)";
+		case image_capture_area::synthetic_headers: return "synthetic-header (not an original PE header)";
+		case image_capture_area::ambiguous_layout: return "ambiguous-overlapping-layout";
+		default: return "unknown/adjusted-layout";
+		}
+	}
+
+	const char* capture_reason_name(const stream_wrapper::unread_range& unread, bool memory)
+	{
+		using reason = stream_wrapper::unread_reason;
+		switch (unread.reason)
+		{
+		case reason::invalid_request: return "invalid read request";
+		case reason::source_unavailable: return "source unavailable";
+		case reason::query_failed: return "VirtualQueryEx failed";
+		case reason::invalid_region: return "invalid region metadata";
+		case reason::uncommitted:
+			return unread.memory_state == MEM_RESERVE ? "MEM_RESERVE" :
+				unread.memory_state == MEM_FREE ? "MEM_FREE" : "uncommitted memory";
+		case reason::no_access: return "PAGE_NOACCESS";
+		case reason::guard_page: return "PAGE_GUARD (not accessed)";
+		case reason::read_failed: return memory ? "ReadProcessMemory failed" : "file read failed";
+		case reason::short_read: return "short read";
+		case reason::seek_failed: return "file seek failed";
+		case reason::end_of_file: return "end of file";
+		default: return "unreported read failure";
+		}
+	}
 }
 
 void pe_header::_clear_images()
@@ -27,12 +64,15 @@ void pe_header::_clear_images()
 	_header_sections = NULL;
 	_num_sections = 0;
 	_parsed_sections = false;
+	_capture = image_capture_report();
 	_unique_hash = _unique_hash_ep = _unique_hash_ep_short = 0;
 }
 
 void pe_header::_clear_header()
 {
 	_clear_images();
+	_generated_header = false;
+	_section_layout_adjusted = false;
 	delete[] _raw_header;
 	_raw_header = NULL;
 	_raw_header_size = 0;
@@ -780,6 +820,7 @@ bool pe_header::build_pe_header( __int64 size, bool amd64, int num_sections_limi
 		memset( _raw_header, 0, _raw_header_size );
 		_original_base = (void*) ((__int64) _original_base -  (__int64) _raw_header_size);
 		_stream->update_base(-(__int64) _raw_header_size);
+		_generated_header = true;
 
 		// Build the old dos header
 		_header_dos = (IMAGE_DOS_HEADER*) _raw_header;
@@ -1042,6 +1083,187 @@ bool pe_header::process_pe_header( )
 	return false;
 }
 
+bool pe_header::_read_image(long offset, SIZE_T size, unsigned char* output, SIZE_T* read, SIZE_T rva)
+{
+	const bool complete = _stream->read(offset, size, output, read);
+	_capture.requested_bytes += size;
+	_capture.read_bytes += *read;
+	if (!_stream->unread_ranges.empty())
+	{
+		for (const auto& range : _stream->unread_ranges)
+		{
+			auto unread = range;
+			unread.offset += rva;
+			_capture.unread_ranges.push_back(unread);
+		}
+	}
+	else if (*read < size)
+		_capture.unread_ranges.push_back({rva + *read, size - *read});
+	if (!complete || *read != size)
+		_capture.status = image_capture_status::partial;
+	return complete;
+}
+
+void pe_header::_classify_capture()
+{
+	_capture.memory_source = !_stream->file_alignment;
+	_capture.base_address = _capture.memory_source ? static_cast<unsigned __int64>(_stream->get_address()) : 0;
+	_capture.generated_layout = _generated_header;
+	_capture.adjusted_layout = _section_layout_adjusted;
+
+	struct span { SIZE_T start, end; int section; };
+	std::vector<span> sections, directories;
+	std::vector<std::string> names;
+	std::vector<SIZE_T> boundaries{0, _image_size};
+	const SIZE_T headers_size = _parsed_pe_32 ? _header_pe32->OptionalHeader.SizeOfHeaders : _header_pe64->OptionalHeader.SizeOfHeaders;
+	if (headers_size) boundaries.push_back(headers_size);
+	const SIZE_T table_end = reinterpret_cast<unsigned char*>(_header_sections + _num_sections) - _raw_header;
+	if (headers_size < table_end) _capture.adjusted_layout = true;
+	for (int i = 0; i < _num_sections; ++i)
+	{
+		const auto& section = _header_sections[i];
+		std::string name;
+		for (unsigned char value : section.Name)
+		{
+			if (!value) break;
+			name += value >= 32 && value <= 126 && value != '\'' && value != '\\' ? static_cast<char>(value) : '_';
+		}
+		names.push_back(name);
+		const SIZE_T start = section.VirtualAddress;
+		const SIZE_T size = (std::max)(section.Misc.VirtualSize, section.SizeOfRawData);
+		if (size > _image_size - start) _capture.adjusted_layout = true;
+		const SIZE_T end = start + (std::min)(size, _image_size - start);
+		if (start == end) continue;
+		sections.push_back({start, end, i});
+		boundaries.push_back(start);
+		boundaries.push_back(end);
+	}
+	const auto* entries = _parsed_pe_32 ? _header_pe32->OptionalHeader.DataDirectory : _header_pe64->OptionalHeader.DataDirectory;
+	const DWORD declared_directories = _parsed_pe_32 ? _header_pe32->OptionalHeader.NumberOfRvaAndSizes : _header_pe64->OptionalHeader.NumberOfRvaAndSizes;
+	if (declared_directories > IMAGE_NUMBEROF_DIRECTORY_ENTRIES) _capture.adjusted_layout = true;
+	for (DWORD i = 0; i < (std::min<DWORD>)(declared_directories, IMAGE_NUMBEROF_DIRECTORY_ENTRIES); ++i)
+	{
+		// Certificates use file offsets, so they must not turn an RVA gap into mapped data.
+		if (i == IMAGE_DIRECTORY_ENTRY_SECURITY || !entries[i].VirtualAddress || !entries[i].Size) continue;
+		const SIZE_T start = entries[i].VirtualAddress;
+		if (start >= _image_size)
+		{
+			_capture.adjusted_layout = true;
+			continue;
+		}
+		if (entries[i].Size > _image_size - start) _capture.adjusted_layout = true;
+		const SIZE_T end = start + (std::min<SIZE_T>)(entries[i].Size, _image_size - start);
+		directories.push_back({start, end, -1});
+		boundaries.push_back(start);
+		boundaries.push_back(end);
+	}
+	if (_capture.unread_ranges.empty()) return;
+	std::sort(boundaries.begin(), boundaries.end());
+	boundaries.erase(std::unique(boundaries.begin(), boundaries.end()), boundaries.end());
+	struct classified_span { SIZE_T end; image_capture_area area; int section; };
+	std::vector<classified_span> layout;
+	for (size_t i = 0; i + 1 < boundaries.size(); ++i)
+	{
+		const SIZE_T start = boundaries[i];
+		int matches = 0, section = -1;
+		for (const auto& entry : sections)
+			if (start >= entry.start && start < entry.end) { ++matches; section = entry.section; }
+		image_capture_area area;
+		if (matches > 1 || (matches && start < headers_size))
+		{
+			area = image_capture_area::ambiguous_layout;
+			section = -1;
+		}
+		else if (start < headers_size)
+			area = _generated_header ? image_capture_area::synthetic_headers : image_capture_area::headers;
+		else if (matches)
+			area = (_header_sections[section].Characteristics & (IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_CNT_CODE)) ?
+				image_capture_area::executable_section : image_capture_area::data_section;
+		else if (std::any_of(directories.begin(), directories.end(), [start](const span& entry) { return start >= entry.start && start < entry.end; }))
+			area = image_capture_area::directory_data;
+		else
+			area = _capture.adjusted_layout ? image_capture_area::unknown_layout : image_capture_area::outside_layout;
+		layout.push_back({boundaries[i + 1], area, section});
+	}
+	for (const auto& unread : _capture.unread_ranges)
+	{
+		if (!unread.size) continue;
+		const SIZE_T end = unread.offset + unread.size;
+		size_t index = static_cast<size_t>(std::upper_bound(boundaries.begin(), boundaries.end(), unread.offset) - boundaries.begin() - 1);
+		for (SIZE_T start = unread.offset; start < end; ++index)
+		{
+			const auto& entry = layout[index];
+			const SIZE_T size = (std::min)(end, entry.end) - start;
+			image_unread_range detail;
+			detail.unread = unread;
+			detail.unread.offset = start;
+			detail.unread.size = size;
+			detail.area = entry.area;
+			detail.section_index = entry.section;
+			if (entry.section >= 0) detail.section_name = names[entry.section];
+			if (!_capture.classified_ranges.empty() &&
+				_capture.classified_ranges.back().unread.offset + _capture.classified_ranges.back().unread.size == start &&
+				_capture.classified_ranges.back().area == detail.area && _capture.classified_ranges.back().section_index == detail.section_index &&
+				_capture.classified_ranges.back().unread.reason == unread.reason && _capture.classified_ranges.back().unread.error == unread.error &&
+				_capture.classified_ranges.back().unread.memory_state == unread.memory_state && _capture.classified_ranges.back().unread.protection == unread.protection)
+				_capture.classified_ranges.back().unread.size += size;
+			else
+				_capture.classified_ranges.push_back(std::move(detail));
+			switch (entry.area)
+			{
+			case image_capture_area::headers: _capture.unread_header_bytes += size; break;
+			case image_capture_area::executable_section: _capture.unread_executable_bytes += size; break;
+			case image_capture_area::data_section: _capture.unread_data_bytes += size; break;
+			case image_capture_area::directory_data: _capture.unread_directory_bytes += size; break;
+			case image_capture_area::outside_layout: _capture.unread_outside_layout_bytes += size; break;
+			case image_capture_area::synthetic_headers: _capture.unread_synthetic_header_bytes += size; break;
+			default: _capture.unread_unknown_bytes += size; break;
+			}
+			start += size;
+		}
+	}
+}
+
+bool pe_header::_finish_capture()
+{
+	_classify_capture();
+	if (_capture.read_bytes == 0)
+	{
+		_capture.status = image_capture_status::failed;
+		_parsed_sections = false;
+	}
+	else if (_capture.status != image_capture_status::partial)
+		_capture.status = image_capture_status::complete;
+	if (_capture.status != image_capture_status::complete)
+	{
+		char location[FILEPATH_SIZE + 1] = {};
+		_stream->get_location(location, sizeof(location));
+		fprintf(stderr, "WARNING: module '%s' at %s: %s image capture (%llu/%llu bytes read; source=%s, layout=%s%s); unreadable bytes are zero-filled, not observed zeros.\n",
+			get_name(), location, _capture.status == image_capture_status::failed ? "failed" : "partial",
+			_capture.read_bytes, _capture.requested_bytes, _capture.memory_source ? "memory" : "file",
+			_capture.generated_layout ? "generated" : "parsed", _capture.adjusted_layout ? "/adjusted" : "");
+		fprintf(stderr, "WARNING: module '%s' at %s: unread-byte summary: header=%llu, code/executable=%llu, data=%llu, directory-outside-sections=%llu, outside-layout=%llu, synthetic-header=%llu, unknown/overlap=%llu. Classification follows parsed metadata, not proof of PE validity or harmless gaps.\n",
+			get_name(), location, _capture.unread_header_bytes, _capture.unread_executable_bytes,
+			_capture.unread_data_bytes, _capture.unread_directory_bytes, _capture.unread_outside_layout_bytes,
+			_capture.unread_synthetic_header_bytes, _capture.unread_unknown_bytes);
+		for (const auto& detail : _capture.classified_ranges)
+		{
+			const auto& unread = detail.unread;
+			std::string section;
+			if (detail.section_index >= 0)
+				section = ", section=#" + std::to_string(detail.section_index) + " '" + detail.section_name + "'";
+			char native_details[128] = {};
+			if (_capture.memory_source)
+				sprintf_s(native_details, sizeof(native_details), "; Win32-error=%lu, state=0x%lX, protect=0x%lX",
+					unread.error, unread.memory_state, unread.protection);
+			fprintf(stderr, "WARNING: module '%s' at %s: unread image RVA [0x%zX, 0x%zX); area=%s%s; reason=%s%s.\n",
+				get_name(), location, unread.offset, unread.offset + unread.size, capture_area_name(detail.area), section.c_str(),
+				capture_reason_name(unread, _capture.memory_source), native_details);
+		}
+	}
+	return _capture.status != image_capture_status::failed;
+}
+
 bool pe_header::process_sections( )
 {
 	_clear_images();
@@ -1052,7 +1274,8 @@ bool pe_header::process_sections( )
 	if (optional_size < minimum_optional_size)
 		return _reject_size();
 	const SIZE_T section_offset = static_cast<SIZE_T>(_header_dos->e_lfanew) + sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) + optional_size;
-	WORD section_count = _parsed_pe_32 ? _header_pe32->FileHeader.NumberOfSections : _header_pe64->FileHeader.NumberOfSections;
+	const WORD declared_section_count = _parsed_pe_32 ? _header_pe32->FileHeader.NumberOfSections : _header_pe64->FileHeader.NumberOfSections;
+	WORD section_count = declared_section_count;
 	const DWORD declared_image_size = _parsed_pe_32 ? _header_pe32->OptionalHeader.SizeOfImage : _header_pe64->OptionalHeader.SizeOfImage;
 	const DWORD headers_size = _parsed_pe_32 ? _header_pe32->OptionalHeader.SizeOfHeaders : _header_pe64->OptionalHeader.SizeOfHeaders;
 	if (section_count == 0 || !range_fits(_raw_header_size, section_offset, sizeof(IMAGE_SECTION_HEADER)) ||
@@ -1063,6 +1286,7 @@ bool pe_header::process_sections( )
 		section_count = static_cast<WORD>((_raw_header_size - section_offset - 1) / sizeof(IMAGE_SECTION_HEADER));
 	if (section_count == 0)
 		return _reject_size();
+	_section_layout_adjusted = _section_layout_adjusted || section_count != declared_section_count;
 	const IMAGE_SECTION_HEADER* sections = reinterpret_cast<const IMAGE_SECTION_HEADER*>(_raw_header + section_offset);
 	const IMAGE_SECTION_HEADER& last = sections[section_count - 1];
 	if (!range_fits(MAX_PE_IMAGE_SIZE, last.VirtualAddress, last.Misc.VirtualSize))
@@ -1158,7 +1382,7 @@ bool pe_header::process_sections( )
 				
 				if( _test_read( _image, _image_size, _image, _header_pe32->OptionalHeader.SizeOfHeaders ) )
 				{
-					if( !_stream->read(0, _header_pe32->OptionalHeader.SizeOfHeaders, _image, &num_read ) && _options->Verbose )
+					if( !_read_image(0, _header_pe32->OptionalHeader.SizeOfHeaders, _image, &num_read, 0 ) && _options->Verbose )
 					{
 						char* location = new char[FILEPATH_SIZE + 1];
 						_stream->get_location(location, FILEPATH_SIZE + 1);
@@ -1186,8 +1410,8 @@ bool pe_header::process_sections( )
 							range_fits(LONG_MAX, this->_header_sections[i].PointerToRawData, this->_header_sections[i].SizeOfRawData) )
 						{
 							// Read in this section
-							if( !_stream->read( this->_header_sections[i].PointerToRawData, this->_header_sections[i].SizeOfRawData,
-								_image + (SIZE_T) this->_header_sections[i].VirtualAddress, &num_read ) && _options->Verbose )
+							if( !_read_image( this->_header_sections[i].PointerToRawData, this->_header_sections[i].SizeOfRawData,
+								_image + (SIZE_T) this->_header_sections[i].VirtualAddress, &num_read, this->_header_sections[i].VirtualAddress ) && _options->Verbose )
 							{
 								char* location = new char[FILEPATH_SIZE + 1];
 								_stream->get_location(location, FILEPATH_SIZE + 1);
@@ -1202,7 +1426,7 @@ bool pe_header::process_sections( )
 			{
 				// Read in the full image from virtual alignment
 				SIZE_T num_read = 0;
-				if( !_stream->read( 0, _image_size, _image, &num_read ) && _options->Verbose )
+				if( !_read_image( 0, _image_size, _image, &num_read, 0 ) && _options->Verbose )
 				{
 					char* location = new char[FILEPATH_SIZE + 1];
 					_stream->get_location(location, FILEPATH_SIZE + 1);
@@ -1214,7 +1438,7 @@ bool pe_header::process_sections( )
 			if( _options->Verbose )
 				fprintf( stdout, "INFO: Loaded sections for %s with result: %d. %i sections found.\n", this->get_name(), this->_parsed_sections, ( this->_parsed_sections ? this->_num_sections : 0 )  );
 			
-			return true;
+			return _finish_capture();
 		}
 	}
 	else if( this->_parsed_pe_64 )
@@ -1285,7 +1509,7 @@ bool pe_header::process_sections( )
 				
 				if( _test_read( _image, _image_size, _image, _header_pe64->OptionalHeader.SizeOfHeaders ) )
 				{
-					if( !_stream->read(0, _header_pe64->OptionalHeader.SizeOfHeaders, _image, &num_read ) && _options->Verbose )
+					if( !_read_image(0, _header_pe64->OptionalHeader.SizeOfHeaders, _image, &num_read, 0 ) && _options->Verbose )
 					{
 						char* location = new char[FILEPATH_SIZE + 1];
 						_stream->get_location(location, FILEPATH_SIZE + 1);
@@ -1313,8 +1537,8 @@ bool pe_header::process_sections( )
 							range_fits(LONG_MAX, this->_header_sections[i].PointerToRawData, this->_header_sections[i].SizeOfRawData) )
 						{
 							// Read in this section
-							if( !_stream->read( this->_header_sections[i].PointerToRawData, this->_header_sections[i].SizeOfRawData,
-								_image + (SIZE_T) this->_header_sections[i].VirtualAddress, &num_read ) && _options->Verbose )
+							if( !_read_image( this->_header_sections[i].PointerToRawData, this->_header_sections[i].SizeOfRawData,
+								_image + (SIZE_T) this->_header_sections[i].VirtualAddress, &num_read, this->_header_sections[i].VirtualAddress ) && _options->Verbose )
 							{
 								char* location = new char[FILEPATH_SIZE + 1];
 								_stream->get_location(location, FILEPATH_SIZE + 1);
@@ -1329,7 +1553,7 @@ bool pe_header::process_sections( )
 			{
 				// Read in the full image from virtual alignment
 				SIZE_T num_read = 0;
-				if( !_stream->read( 0, _image_size, _image, &num_read ) && _options->Verbose )
+				if( !_read_image( 0, _image_size, _image, &num_read, 0 ) && _options->Verbose )
 				{
 					char* location = new char[FILEPATH_SIZE + 1];
 					_stream->get_location(location, FILEPATH_SIZE + 1);
@@ -1341,7 +1565,7 @@ bool pe_header::process_sections( )
 			if( _options->Verbose )
 				fprintf( stdout, "INFO: Loaded sections for %s with result: %d. %i sections found.\n", this->get_name(), this->_parsed_sections, ( this->_parsed_sections ? this->_num_sections : 0 )  );
 
-			return true;
+			return _finish_capture();
 		}
 	}
 
@@ -1636,15 +1860,23 @@ void pe_header::_recover_entrypoint(pe_hash_database* database)
 		for (SIZE_T offset = 0; range_fits(size, offset, sizeof(ULONGLONG)); ++offset)
 		{
 			const SIZE_T rva = section.VirtualAddress + offset;
-			if (best && rva >= best)
-				break;
 			ULONGLONG prefix = 0;
 			memcpy(&prefix, _image + rva, sizeof(prefix));
 			if (prefix >= hashes->minimum && prefix <= hashes->maximum && hashes->short_hashes.count(prefix) &&
 				rva != 0)
 			{
 				const auto full = _hash_asm(rva);
-				if (full && hashes->full.count(full)) best = static_cast<DWORD>(rva);
+				if (full && hashes->full.count(full))
+				{
+					// A second distinct RVA is ambiguous, even if unwind metadata lists only one.
+					if (best && best != rva)
+					{
+						fprintf(stderr, "WARNING: Ambiguous entrypoint matches for '%s' at RVAs %x and %x; retaining RVA %x.\n",
+							get_name(), best, static_cast<DWORD>(rva), original);
+						return;
+					}
+					best = static_cast<DWORD>(rva);
+				}
 			}
 		}
 	}

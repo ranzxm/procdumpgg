@@ -19,6 +19,8 @@ void append_performance_tests(std::vector<test_case>& tests);
 void append_reexecution_tests(std::vector<test_case>& tests);
 void append_scheduling_tests(std::vector<test_case>& tests);
 void append_entrypoint_tests(std::vector<test_case>& tests);
+void append_gui_runner_tests(std::vector<test_case>& tests);
+int run_gui_runner_fixture(int argc, char** argv);
 int run_performance_benchmark(int argc, char** argv);
 int run_reexecution_probe(int argc, char** argv);
 int run_reexecution_fixture();

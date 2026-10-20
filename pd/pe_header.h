@@ -43,6 +43,45 @@ struct IMPORT_SUMMARY
 	unsigned __int64 HASH_SPECIFIC;
 };
 
+enum class image_capture_status { not_captured, complete, partial, failed };
+
+enum class image_capture_area
+{
+	headers, executable_section, data_section, directory_data, outside_layout,
+	synthetic_headers, ambiguous_layout, unknown_layout
+};
+
+struct image_unread_range
+{
+	stream_wrapper::unread_range unread;
+	image_capture_area area = image_capture_area::unknown_layout;
+	int section_index = -1;
+	std::string section_name;
+};
+
+struct image_capture_report
+{
+	image_capture_status status = image_capture_status::not_captured;
+	// Read-attempt totals; malformed overlapping file sections can count an RVA more than once.
+	unsigned __int64 requested_bytes = 0;
+	unsigned __int64 read_bytes = 0;
+	unsigned __int64 base_address = 0;
+	bool memory_source = false;
+	bool generated_layout = false;
+	bool adjusted_layout = false;
+	unsigned __int64 unread_header_bytes = 0;
+	unsigned __int64 unread_executable_bytes = 0;
+	unsigned __int64 unread_data_bytes = 0;
+	unsigned __int64 unread_directory_bytes = 0;
+	unsigned __int64 unread_outside_layout_bytes = 0;
+	unsigned __int64 unread_synthetic_header_bytes = 0;
+	unsigned __int64 unread_unknown_bytes = 0;
+	// Missing spans use image RVAs, not input file offsets.
+	std::vector<stream_wrapper::unread_range> unread_ranges;
+	// Splits spans at parsed header/section/directory boundaries; not a PE validity verdict.
+	std::vector<image_unread_range> classified_ranges;
+};
+
 class pe_header
 {
 	friend struct entrypoint_benchmark;
@@ -96,6 +135,12 @@ class pe_header
 	export_list* _export_list = NULL;
 	
 	bool _parsed_sections;
+	bool _generated_header = false;
+	bool _section_layout_adjusted = false;
+	image_capture_report _capture;
+	bool _read_image(long offset, SIZE_T size, unsigned char* output, SIZE_T* read, SIZE_T rva);
+	bool _finish_capture();
+	void _classify_capture();
 	int _num_sections = 0;
 	IMAGE_SECTION_HEADER* _header_sections = NULL;
 	DWORD* _header_section_sizes = NULL;
@@ -132,7 +177,9 @@ public:
 	bool process_import_directory( );
 	bool process_export_directory( );
 	bool process_relocation_directory();
+	// A usable partial capture returns true; consult capture_report() for completeness.
 	bool process_sections( );
+	const image_capture_report& capture_report() const { return _capture; }
 	bool process_disk_image(export_list* exports, pe_hash_database* hash_database);
 	bool process_hash( );
 	bool process_hash_ep( );

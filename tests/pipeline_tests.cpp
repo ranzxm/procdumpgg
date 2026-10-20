@@ -214,6 +214,63 @@ namespace
 		}
 	}
 
+	void valid_address_dump(bool win64)
+	{
+		raw_pages memory;
+		const auto fixture = pe_fixture(win64);
+		memcpy(memory.bytes, fixture.data(), 0x200);
+		memcpy(memory.bytes + 0x1000, fixture.data() + 0x200, 0x1000);
+		temporary_file clean, ep, short_ep, directory;
+		require(DeleteFileA(directory.path) && CreateDirectoryA(directory.path, NULL), "single-image output directory failed");
+		std::vector<std::string> paths;
+		auto cleanup = [&paths](char* path) {
+			for (const auto& file : paths) DeleteFileA(file.c_str());
+			RemoveDirectoryA(path);
+		};
+		std::unique_ptr<char, decltype(cleanup)> output(directory.path, cleanup);
+		const auto collect_files = [&] {
+			std::vector<std::string> files;
+			WIN32_FIND_DATAA entry = {};
+			const auto pattern = std::string(directory.path) + "\\*";
+			HANDLE found = FindFirstFileA(pattern.c_str(), &entry);
+			if (found == INVALID_HANDLE_VALUE && GetLastError() == ERROR_FILE_NOT_FOUND) return files;
+			require(found != INVALID_HANDLE_VALUE, "enumerate single-image output directory");
+			do
+			{
+				if (!(entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+				{
+					const auto file = std::string(directory.path) + "\\" + entry.cFileName;
+					files.push_back(file);
+					paths.push_back(file);
+				}
+			} while (FindNextFileA(found, &entry));
+			const DWORD error = GetLastError();
+			FindClose(found);
+			require(error == ERROR_NO_MORE_FILES, "incomplete single-image output enumeration");
+			return files;
+		};
+		pe_hash_database database(clean.path, ep.path, short_ep.path);
+		test_options options;
+		options.set_output_path(directory.path);
+		options.DumpChunks = true; // Address mode must not scan/dump unrelated regions.
+		pe_header source(GetCurrentProcess(), memory.bytes, NULL, &options);
+		require(source.process_pe_header() && source.process_sections(), "single-image fixture rejected");
+		const auto hash = source.get_hash();
+		require(hash != 0, "single-image fixture hash missing");
+		dump_process dumper(GetCurrentProcessId(), &database, &options, true);
+		dumper.dump_region(reinterpret_cast<uintptr_t>(memory.bytes));
+		const auto files = collect_files();
+		require(files.size() == 1, "valid address dump wrote other modules or both generated architectures");
+		{
+			pe_header check(const_cast<char*>(files[0].c_str()), &options);
+			require(check.process_pe_header() && check.is_64() == win64 && check.is_exe(), "single-image output architecture/type changed");
+		}
+		require(DeleteFileA(files[0].c_str()) != 0, "remove first single-image fixture output");
+		require(database.add_hashes({hash}), "register single-image clean hash");
+		dumper.dump_region(reinterpret_cast<uintptr_t>(memory.bytes));
+		require(collect_files().empty(), "address dump bypassed clean-hash filtering");
+	}
+
 	BOOL WINAPI many_modules(HANDLE, HMODULE* modules, DWORD capacity, LPDWORD needed, DWORD)
 	{
 		const DWORD count = 4097;
@@ -299,6 +356,8 @@ void append_pipeline_tests(std::vector<test_case>& tests)
 	tests.push_back({"pe32-generated-image-type", [] { generated_image_type(false); }});
 	tests.push_back({"pe64-generated-image-type", [] { generated_image_type(true); }});
 	tests.push_back({"raw-address-dump", raw_address_dump});
+	tests.push_back({"pe32-single-address-dump", [] { valid_address_dump(false); }});
+	tests.push_back({"pe64-single-address-dump", [] { valid_address_dump(true); }});
 	tests.push_back({"large-and-changing-module-snapshots", module_snapshot_bounds});
 	tests.push_back({"default-dump-options", default_dump_options});
 	tests.push_back({"concurrent-database-lookup", concurrent_database_lookup});

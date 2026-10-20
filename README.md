@@ -19,6 +19,60 @@ You can download the latest compiled release of Process Dump here:
 
 Use `pd64.exe` on 64-bit Windows (recommended), or `pd32.exe` on 32-bit Windows. Both binaries are standalone; no Microsoft Visual C++ Redistributable is required.
 
+## Desktop GUI (source builds)
+
+The solution also builds `pd_gui.exe`, a native Dear ImGui interface using Win32
+and DirectX 11. Keep it beside the matching `pd.exe` from the same build. Launch
+`x64\Release\pd_gui.exe` after building the solution (x64 recommended).
+
+1. Select a process from the searchable list, or enter a decimal PID. Refresh the
+   list if the process restarts.
+2. Choose **Dump scope**: **All modules** (the default), **Main EXE only**, or
+   **Specific module**. For a specific module, select **Load modules**, filter the
+   dropdown by name/base, and select a loaded module. Hover the module-path label
+   to inspect its full path.
+3. Choose a private output folder and adjust reconstruction/diagnostic options,
+   then select **Dump all modules**, **Dump main EXE**, or **Dump selected module**.
+   New output folders are created when dumping.
+4. Read the diagnostics and inspect output files. Copy the log before starting
+   another dump: the GUI retains only the newest 1 MiB. CLI output can be buffered,
+   so a quiet log does not mean the dumper has stopped.
+
+The GUI runs the existing CLI in the background; it does not replace the engine
+or infer completeness from exit code 0. It uses the existing hash databases beside
+`pd.exe`. **Stop dump** stops only the owned dumper subprocess, not the target;
+incomplete output files may remain. Closing during a dump asks for confirmation.
+Stopping forcibly can also lose buffered CLI output. Folder preparation and
+launch run in the background; cancellation of a slow filesystem request may take
+time, but the interface stays responsive while waiting.
+
+Main/specific-image modes resolve and recheck the target's loaded module base in
+the background and use the CLI's `-pid ... -a 0xBASE` path. Loose-code capture is
+disabled in these modes. Import/export collection may still read other modules,
+so diagnostics can mention DLLs that are not being written. Clean-hash filtering
+applies in every scope; a skipped image or reconstruction/write failure can
+produce no output. If an existing PE header is unavailable, the CLI may generate
+both x86/x64 representations at the requested base instead of one file.
+
+The specific-module list includes registered loaded modules; use **All modules**
+to scan for hidden images. Module selections are cleared when the target changes,
+and stale process/module identities are rejected before launch. Captures remain
+live/non-atomic: modules may change after revalidation. Use the x64 GUI/backend on
+64-bit Windows for both native x64 and WOW64 processes; a Win32 GUI cannot list
+native x64 modules reliably.
+
+Current scope is one PID at a time, without system dumping, database management,
+or close monitoring. Worker-count controls are intentionally omitted because
+direct PID dumps in the CLI are synchronous. Output paths must be ASCII because
+the CLI still uses legacy narrow-character path conversion; unsupported paths
+are rejected instead of silently changed. Run the GUI as Administrator only when
+the selected target requires it. Dumps may contain credentials and private data.
+
+Dear ImGui is vendored at a pinned version in `third_party/imgui`; builds need no
+dependency download. Redistribute `ImGui-LICENSE.txt` and
+`ProcessDump-LICENSE.txt` with the GUI. Existing tagged CLI release packaging is
+unchanged.
+
 # Command-line arguments
 Process Dump can dump all unknown code from memory (`-system`), dump specific processes, or monitor processes and dump them before they terminate.
 
@@ -78,7 +132,7 @@ Database files default to the application directory: `clean.hashes`, `entrypoint
 | Option | Description |
 |--------|-------------|
 | `-g` | Forces generation of both 32-bit and 64-bit PE headers, ignoring existing headers. |
-| `-eprec` | Forces entrypoint recovery even if a valid entrypoint exists. Recovery is heuristic; an unsuccessful search leaves the old value unchanged. |
+| `-eprec` | Forces entrypoint recovery even if a valid entrypoint exists. Recovery is heuristic; no match or multiple matching RVAs leave the old value unchanged. |
 | `-ni` | Disables aggressive import reconstruction (enabled by default). |
 | `-nc` | Disables loose-code dumping and hashing (enabled by default). |
 | `-nep` | Disables entrypoint recovery and live entrypoint hashing, overriding `-eprec`. File database generation still collects entrypoint signatures. |
@@ -109,6 +163,25 @@ For malware analysis, use an isolated lab and run Process Dump as Administrator:
 * Press Ctrl+C to stop the monitor.
 
 Dumps are written to the working directory unless `-o` is set. Keep them private. Dumps are for analysis and are not guaranteed to run; images larger than 256 MiB are rejected.
+
+Partial image captures are retained for analysis. A warning is printed even without `-v`, including unread image RVA ranges. Those ranges are zero-filled placeholders, not observed zero bytes; retain the diagnostics with the dump. A capture with no readable image bytes is rejected. The C++ `capture_report()` API distinguishes complete, partial, failed and not-yet-captured images.
+
+Capture diagnostics include the source location (image base for memory), parsed
+or generated layout, and an unread-byte summary for original headers,
+code/executable sections, data sections, PE directories outside sections,
+outside-layout spans, synthetic headers and unknown/overlapping layout. Ranges
+crossing layout boundaries are split and identify the section index/name where
+unambiguous. Memory diagnostics retain the observed state/protection and causes
+such as `PAGE_NOACCESS`, `PAGE_GUARD`, uncommitted memory, or a failed Windows API
+call with its error code. File captures can identify EOF/seek/read failures.
+
+An outside-layout span is only a **possible alignment gap**, not proof that its
+contents are irrelevant. Declared PE-directory ranges are not treated as gaps,
+and limited/truncated section metadata leaves uncovered spans unknown. Synthetic
+headers for loose-code images are distinguished from unread original headers.
+Classification follows the parsed metadata; it does not certify that the image,
+imports or entrypoint are correct, malware-free, or runnable. Capture status and
+zero-fill behavior are unchanged, even when only outside-layout bytes are missing.
 
 # Notes on the naming convention of dumped modules:
 * `hiddenmodule` instead of a module name indicates the module was not properly registered in the process.
@@ -191,6 +264,12 @@ To build and run the tests from a Visual Studio Developer PowerShell:
 ```powershell
 msbuild pd.sln /m /p:Configuration=Release /p:Platform=x64
 .\x64\Release\pd_tests.exe
+.\x64\Release\pd_gui.exe --smoke-test
 ```
 
 Use `Platform=Win32` for a 32-bit build. Python tests can be run with `python -m unittest discover -s tests -p "test_*.py"`.
+
+`--smoke-test` renders eight hidden GUI frames and exits without launching a dump.
+Set `PD_GUI_TEST_EXE` to the built GUI executable when running Python tests to
+also check hidden rendering and closing a minimized idle window. These GUI tests
+do not capture process memory.

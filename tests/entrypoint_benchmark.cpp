@@ -188,6 +188,43 @@ struct entrypoint_benchmark
 		image._recover_entrypoint(&database);
 		require(entry == 0, "nonexecutable signature was selected");
 		image._header_sections[0].Characteristics |= IMAGE_SCN_MEM_EXECUTE;
+		options.Verbose = false;
+		memcpy(image._image + 0x1100, image._image + 0x1040, 128);
+		if (win64)
+		{
+			// A unique metadata candidate must not hide ambiguity in the raw scan.
+			image._header_pe64->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION] =
+				{0x1e00, sizeof(IMAGE_RUNTIME_FUNCTION_ENTRY)};
+			IMAGE_RUNTIME_FUNCTION_ENTRY function = {0x1040, 0x1080, 0x1f00};
+			memcpy(image._image + 0x1e00, &function, sizeof(function));
+		}
+		for (DWORD original : {0u, 0x1000u, 0x1040u, 0x9000u})
+		{
+			entry = original;
+			image._recover_entrypoint(&database);
+			require(entry == original, "ambiguous raw matches overwrote the original entrypoint");
+		}
+		// Also reject matches against distinct full signatures, not only duplicated code.
+		image._image[0x1110] = 0x31;
+		image._image[0x1111] = 0xc0;
+		const auto other_full = image._hash_asm(0x1100);
+		require(other_full && other_full != full, "second signature fixture is not distinct");
+		database.add_hashes_eps({other_full}, {image._hash_short_asm(0x1100)});
+		entry = 0;
+		image._recover_entrypoint(&database);
+		require(entry == 0, "distinct supported signatures guessed an entrypoint");
+		memset(image._image + 0x1100, 0xcc, 128);
+		if (win64)
+			image._header_pe64->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION] = {};
+		image._image[0x1040] = 0xcc;
+		entry = 0x9000;
+		image._recover_entrypoint(&database);
+		require(entry == 0x9000, "no-match recovery overwrote the original entrypoint");
+		image._image[0x1040] = code[0];
+		entry = 0;
+		image._recover_entrypoint(&database);
+		require(entry == 0x1040, "unique recovery failed after ambiguous candidates were removed");
+		entry = 0;
 		if (win64)
 		{
 			auto& directory = image._header_pe64->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];

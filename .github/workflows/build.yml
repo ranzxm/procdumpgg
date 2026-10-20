@@ -27,19 +27,30 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
       - uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
-      - name: Build application and unit tests
+      - name: Build CLI, GUI and unit tests
         run: msbuild pd.sln /m /v:minimal /p:Configuration=${{ matrix.configuration }} /p:Platform=${{ matrix.platform }}
       - name: Run unit tests
         run: |
           & ".\${{ matrix.platform }}\${{ matrix.configuration }}\pd_tests.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Test CLI documentation, benchmark analysis and release artifact handling
+      - name: Test CLI, GUI startup/close, benchmark analysis and release artifacts
         env:
           PD_TEST_EXE: .\${{ matrix.platform }}\${{ matrix.configuration }}\pd.exe
+          PD_GUI_TEST_EXE: .\${{ matrix.platform }}\${{ matrix.configuration }}\pd_gui.exe
         run: python -m unittest discover -s tests -p "test_*.py"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: matrix.configuration == 'Release'
         with:
           name: ${{ matrix.platform }} Executable
           path: .\${{ matrix.platform }}\Release\pd.exe
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: matrix.configuration == 'Release'
+        with:
+          name: ${{ matrix.platform }} GUI
+          path: |
+            .\${{ matrix.platform }}\Release\pd_gui.exe
+            .\${{ matrix.platform }}\Release\pd.exe
+            .\${{ matrix.platform }}\Release\ImGui-LICENSE.txt
+            .\${{ matrix.platform }}\Release\ProcessDump-LICENSE.txt
           if-no-files-found: error

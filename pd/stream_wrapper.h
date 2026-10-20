@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <limits.h>
 #include <algorithm>
+#include <vector>
 #include "windows.h"
 #include "simple.h"
 #include <tlhelp32.h>
@@ -12,6 +13,22 @@
 class stream_wrapper
 {
 public:
+	enum class unread_reason
+	{
+		unknown, invalid_request, source_unavailable, query_failed, invalid_region,
+		uncommitted, no_access, guard_page, read_failed, short_read, seek_failed, end_of_file
+	};
+	struct unread_range
+	{
+		SIZE_T offset;
+		SIZE_T size;
+		unread_reason reason = unread_reason::unknown;
+		DWORD error = ERROR_SUCCESS;
+		DWORD memory_state = 0;
+		DWORD protection = 0;
+	};
+	// Relative to the last read; process reads can have holes before later readable bytes.
+	std::vector<unread_range> unread_ranges;
 	bool file_alignment;
 	virtual SIZE_T block_size(long offset) = 0;
 	virtual bool read(long offset, SIZE_T size, unsigned char* output, SIZE_T* out_read) = 0;
@@ -95,14 +112,30 @@ public:
 	}
 	virtual bool read(long offset, SIZE_T size, unsigned char* output, SIZE_T* out_read)
 	{
+		unread_ranges.clear();
 		if (out_read == NULL)
 			return false;
 		*out_read = 0;
-		if (fh == NULL || offset < 0 || (output == NULL && size != 0))
+		if (offset < 0 || (output == NULL && size != 0))
+		{
+			if (size) unread_ranges.push_back({0, size, unread_reason::invalid_request});
 			return false;
+		}
+		if (fh == NULL)
+		{
+			if (size) unread_ranges.push_back({0, size, unread_reason::source_unavailable});
+			return false;
+		}
+		clearerr(fh);
 		if (_fseeki64(fh, offset, SEEK_SET) != 0)
+		{
+			if (size) unread_ranges.push_back({0, size, unread_reason::seek_failed});
 			return false;
+		}
 		*out_read = fread(output, 1, size, fh);
+		if (*out_read < size)
+			unread_ranges.push_back({*out_read, size - *out_read,
+				ferror(fh) ? unread_reason::read_failed : unread_reason::end_of_file});
 		return *out_read == size;
 	}
 	~file_stream()
@@ -259,12 +292,16 @@ public:
 
 	virtual bool read(long offset, SIZE_T size, unsigned char* output, SIZE_T* out_read)
 	{
+		unread_ranges.clear();
 		if (out_read == NULL)
 			return false;
 		*out_read = 0;
 		uintptr_t address = 0;
 		if (!address_at(offset, address) || (output == NULL && size != 0) || size > UINTPTR_MAX - address)
+		{
+			if (size) unread_ranges.push_back({0, size, unread_reason::invalid_request});
 			return false;
+		}
 
 		SIZE_T processed = 0;
 		bool complete = true;
@@ -272,24 +309,41 @@ public:
 		{
 			MEMORY_BASIC_INFORMATION region = {};
 			const uintptr_t current = address + processed;
-			if (VirtualQueryEx(ph, reinterpret_cast<LPCVOID>(current), &region, sizeof(region)) != sizeof(region))
+			const SIZE_T queried = VirtualQueryEx(ph, reinterpret_cast<LPCVOID>(current), &region, sizeof(region));
+			const DWORD query_error = queried == 0 ? GetLastError() : ERROR_SUCCESS;
+			if (queried != sizeof(region))
+			{
+				unread_ranges.push_back({processed, size - processed, unread_reason::query_failed, query_error});
 				return false;
+			}
 			const uintptr_t start = reinterpret_cast<uintptr_t>(region.BaseAddress);
 			if (current < start || current - start >= region.RegionSize)
+			{
+				unread_ranges.push_back({processed, size - processed, unread_reason::invalid_region,
+					ERROR_SUCCESS, region.State, region.Protect});
 				return false;
+			}
 			const SIZE_T count = (std::min)(size - processed, region.RegionSize - (current - start));
 			if (region.State == MEM_COMMIT && !(region.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
 			{
 				SIZE_T read = 0;
 				const BOOL success = ReadProcessMemory(ph, reinterpret_cast<LPCVOID>(current), output + processed, count, &read);
+				const DWORD read_error = success ? ERROR_SUCCESS : GetLastError();
 				*out_read += read;
 				if (!success || read != count)
 					complete = false;
+				if (read < count)
+					unread_ranges.push_back({processed + read, count - read,
+						success ? unread_reason::short_read : unread_reason::read_failed,
+						read_error, region.State, region.Protect});
 			}
 			else
 			{
 				// Preserve unreadable spans so the caller's zero-filled image stays sparse.
 				complete = false;
+				const unread_reason reason = region.State != MEM_COMMIT ? unread_reason::uncommitted :
+					(region.Protect & PAGE_GUARD) ? unread_reason::guard_page : unread_reason::no_access;
+				unread_ranges.push_back({processed, count, reason, ERROR_SUCCESS, region.State, region.Protect});
 			}
 			processed += count;
 		}

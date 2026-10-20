@@ -132,6 +132,8 @@ int main(int argc, char** argv)
 	_CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
 #endif
 	setvbuf(stdout, NULL, _IONBF, 0);
+	if (argc > 1 && strcmp(argv[1], "-pid") == 0)
+		return run_gui_runner_fixture(argc, argv);
 	if (argc > 1 && strcmp(argv[1], "--benchmark") == 0)
 		return run_performance_benchmark(argc - 2, argv + 2);
 	if (argc > 1 && strcmp(argv[1], "--reexecute") == 0)
@@ -171,6 +173,7 @@ int main(int argc, char** argv)
 		append_reexecution_tests(tests);
 		append_scheduling_tests(tests);
 		append_entrypoint_tests(tests);
+		append_gui_runner_tests(tests);
 	}
 	int failures = 0, count = 0;
 	for (const auto& test : tests)
