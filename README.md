@@ -1,7 +1,20 @@
-# Process Dump
-Process Dump is a Windows reverse-engineering command-line tool to dump malware memory components back to disk for analysis. Often malware files are packed and obfuscated before they are executed in order to avoid AV scanners, however when these files are executed they will often unpack or inject a clean version of the malware code in memory. A common task for malware researchers when analyzing malware is to dump this unpacked code back from memory to disk for scanning with AV products or for analysis with static analysis tools such as IDA.
+# procdumpgg
 
-Process Dump works for Windows 32 and 64 bit operating systems and can dump memory components from specific processes or from all processes currently running. Process Dump supports creation and use of a clean-hash database, so that dumping of known files such as kernel32.dll can be skipped. Its main features include:
+Windows process-memory dumping and PE reconstruction with a native desktop GUI
+and a command-line backend. This repository is a fork of
+[Process Dump by Geoff McDonald](https://github.com/glmcdona/Process-Dump),
+extended with a Dear ImGui interface and detailed partial-capture diagnostics.
+The engine and executable names remain `pd.exe` (CLI) and `pd_gui.exe` (GUI).
+
+Use it to capture unpacked or injected code for static analysis. Supports x86
+and x64 builds; x64 is recommended on 64-bit Windows.
+
+## Features
+
+* Native Win32/DirectX 11 GUI with a searchable process list and manual PID entry.
+* GUI dump scopes: all modules, main EXE only, or a selected loaded module.
+* Background dumping with diagnostics, cancellation, and close confirmation.
+* Partial-capture reports identifying unread RVA ranges and their causes; unread bytes are zero-filled, not assumed to be observed zeros.
 * Dumps code from a specific process or all processes.
 * Finds and dumps hidden modules that are not properly loaded in processes.
 * Finds and dumps loose code chunks even if they aren't associated with a PE file. It builds a PE header and import table for the chunks.
@@ -10,16 +23,24 @@ Process Dump works for Windows 32 and 64 bit operating systems and can dump memo
 * Multi-threaded, so when you are dumping all running processes it will go pretty quickly.
 * Can generate a clean hash database. Generate this on a clean system to skip known modules during later dumps.
 
-I'm maintaining an official compiled release on my website here:
-  https://split-code.com/processdump.html
+## Get started
 
-# Installation
-You can download the latest compiled release of Process Dump here:
-* https://github.com/glmcdona/Process-Dump/releases
+### Download
 
-Use `pd64.exe` on 64-bit Windows (recommended), or `pd32.exe` on 32-bit Windows. Both binaries are standalone; no Microsoft Visual C++ Redistributable is required.
+* [Releases for this fork](https://github.com/ranzxm/procdumpgg/releases): when published, CLI assets are named `pd64.exe` and `pd32.exe`. Release packaging currently includes only the CLI, not the GUI.
+* [Build workflow](https://github.com/ranzxm/procdumpgg/actions/workflows/build.yml): after a successful run, download the `x64 GUI` artifact (recommended) or `Win32 GUI` artifact. Downloading Actions artifacts requires a GitHub sign-in.
+* If no suitable binaries are available, [build from source](#compiling-source-code).
 
-## Desktop GUI (source builds)
+Extract the entire GUI artifact into one folder. Keep `pd_gui.exe`, the matching
+`pd.exe`, `ImGui-LICENSE.txt`, and `ProcessDump-LICENSE.txt` together, then launch
+`pd_gui.exe`. The GUI requires the CLI beside it; it is not a standalone dumper.
+Release builds statically link the C++ runtime, so no Microsoft Visual C++
+Redistributable is required.
+
+Use only on systems and processes you are authorized to analyze. Run malware
+samples in an isolated lab; dumps can contain credentials and other private data.
+
+## Desktop GUI
 
 The solution also builds `pd_gui.exe`, a native Dear ImGui interface using Win32
 and DirectX 11. Keep it beside the matching `pd.exe` from the same build. Launch
@@ -70,11 +91,15 @@ the selected target requires it. Dumps may contain credentials and private data.
 
 Dear ImGui is vendored at a pinned version in `third_party/imgui`; builds need no
 dependency download. Redistribute `ImGui-LICENSE.txt` and
-`ProcessDump-LICENSE.txt` with the GUI. Existing tagged CLI release packaging is
-unchanged.
+`ProcessDump-LICENSE.txt` with the GUI. GUI bundles are available as build
+artifacts; tagged release packaging remains CLI-only.
 
 # Command-line arguments
-Process Dump can dump all unknown code from memory (`-system`), dump specific processes, or monitor processes and dump them before they terminate.
+The Process Dump backend can dump all unknown code from memory (`-system`), dump specific processes, or monitor processes and dump them before they terminate.
+
+Examples below use the release asset name `pd64.exe`. For source builds or GUI
+bundles, use `pd.exe` instead (`.\pd.exe` in PowerShell). Use `pd32.exe` for a
+32-bit CLI release. Create the output folder before using the CLI's `-o` option.
 
 On a clean workstation, generate a baseline database with either:
 * `pd64.exe -db genquick`
@@ -195,6 +220,15 @@ Example filenames:
 
 # Version history
 
+## Fork changes (current main)
+
+* Added the Dear ImGui desktop GUI with process/module selection, three dump scopes, background execution, and cancellation.
+* Added classified partial-image capture diagnostics and the C++ `capture_report()` API.
+* Added GUI runner/startup tests and GUI build artifacts for Win32 and x64.
+
+The versions below describe the inherited Process Dump engine history, not
+separate procdumpgg GUI releases.
+
 ## Version 3.0.0 (October 2nd, 2026)
 * Fixed oversized and empty dumps, and improved section and import reconstruction.
 * Improved entrypoint recovery.
@@ -259,12 +293,27 @@ Example filenames:
 # Compiling source code
 Open `pd.sln` in Visual Studio 2019 or 2022 (Community edition works) with the Desktop development with C++ workload and a Windows SDK installed. Build Release for Win32 or x64; Release builds statically link the runtime.
 
-To build and run the tests from a Visual Studio Developer PowerShell:
+Clone this fork, build, and launch the GUI from a Visual Studio Developer PowerShell:
 
 ```powershell
+git clone https://github.com/ranzxm/procdumpgg.git
+cd procdumpgg
 msbuild pd.sln /m /p:Configuration=Release /p:Platform=x64
+.\x64\Release\pd_gui.exe
+```
+
+Outputs are in `x64\Release\`: `pd.exe`, `pd_gui.exe`, `pd_tests.exe`, and the
+two GUI license files. Dear ImGui sources are vendored; no separate dependency
+download is needed.
+
+Run the tests after a successful build (Python 3 is required for the Python suite):
+
+```powershell
 .\x64\Release\pd_tests.exe
 .\x64\Release\pd_gui.exe --smoke-test
+$env:PD_TEST_EXE = ".\x64\Release\pd.exe"
+$env:PD_GUI_TEST_EXE = ".\x64\Release\pd_gui.exe"
+python -m unittest discover -s tests -p "test_*.py"
 ```
 
 Use `Platform=Win32` for a 32-bit build. Python tests can be run with `python -m unittest discover -s tests -p "test_*.py"`.
@@ -273,3 +322,14 @@ Use `Platform=Win32` for a 32-bit build. Python tests can be run with `python -m
 Set `PD_GUI_TEST_EXE` to the built GUI executable when running Python tests to
 also check hidden rendering and closing a minimized idle window. These GUI tests
 do not capture process memory.
+
+## Credits and license
+
+Based on [Process Dump](https://github.com/glmcdona/Process-Dump) by Geoff McDonald
+([original project website](https://split-code.com/processdump.html)). This fork
+is maintained at [ranzxm/procdumpgg](https://github.com/ranzxm/procdumpgg); upstream
+releases do not include this fork's GUI.
+
+Process Dump is distributed under the [MIT License](LICENSE). The vendored
+Dear ImGui dependency has its own [MIT license](third_party/imgui/LICENSE.txt).
+Preserve both license notices when redistributing a GUI bundle.
